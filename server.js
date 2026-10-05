@@ -41,6 +41,76 @@ const upload = multer({
 
 /*
 ====================================================
+GEMINI GENERATION WITH RETRY
+====================================================
+
+Used mainly for PDF requests.
+
+If Gemini temporarily returns:
+- 503 UNAVAILABLE
+- 429 RESOURCE_EXHAUSTED
+
+we retry automatically.
+
+This does NOT change the normal Chat behavior.
+====================================================
+*/
+
+async function generateWithRetry(request, maxRetries = 3) {
+  let lastError;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(
+        `🤖 Gemini generation attempt ${attempt + 1}/${maxRetries + 1}`
+      );
+
+      const response = await ai.models.generateContent(request);
+
+      return response;
+    } catch (error) {
+      lastError = error;
+
+      const errorText = JSON.stringify(error).toLowerCase();
+
+      const isTemporaryError =
+        errorText.includes("503") ||
+        errorText.includes("unavailable") ||
+        errorText.includes("high demand") ||
+        errorText.includes("429") ||
+        errorText.includes("resource_exhausted");
+
+      if (!isTemporaryError || attempt === maxRetries) {
+        throw error;
+      }
+
+      /*
+      Exponential backoff:
+
+      Attempt 1 fails → wait 2 seconds
+      Attempt 2 fails → wait 4 seconds
+      Attempt 3 fails → wait 8 seconds
+      */
+
+      const delay = Math.pow(2, attempt + 1) * 1000;
+
+      console.log(
+        `⏳ Gemini temporarily unavailable. Retrying in ${
+          delay / 1000
+        } seconds...`
+      );
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, delay)
+      );
+    }
+  }
+
+  throw lastError;
+}
+
+/*
+====================================================
 HOME
 ====================================================
 */
@@ -57,22 +127,21 @@ app.get("/", (req, res) => {
 CHAT ENDPOINT
 ====================================================
 
-IMPORTANT:
+NORMAL CHAT:
 
-Normal Chat:
 {
   "question": "What is AI?"
 }
 
-continues using the existing behavior.
+PDF CHAT:
 
-PDF Chat:
 {
   "question": "What is this PDF about?",
   "fileName": "files/xxxxx"
 }
 
-uses the uploaded PDF as context.
+IMPORTANT:
+Normal Chat continues using the existing behavior.
 ====================================================
 */
 
@@ -97,8 +166,9 @@ app.post("/ask", async (req, res) => {
     NORMAL CHAT
     ------------------------------------------------
 
-    If no PDF is supplied, this is the same
-    behavior as the existing working Chat.
+    No PDF = existing behavior.
+
+    DO NOT change this flow.
     ------------------------------------------------
     */
 
@@ -124,7 +194,7 @@ app.post("/ask", async (req, res) => {
     console.log("Gemini file:", fileName);
 
     /*
-    Get the uploaded Gemini file
+    Get Gemini file
     */
 
     const file = await ai.files.get({
@@ -138,7 +208,7 @@ app.post("/ask", async (req, res) => {
     }
 
     /*
-    Check processing state
+    Check PDF processing state
     */
 
     if (file.state === "PROCESSING") {
@@ -155,7 +225,7 @@ app.post("/ask", async (req, res) => {
     }
 
     /*
-    Make sure Gemini returned a URI
+    Make sure URI exists
     */
 
     if (!file.uri) {
@@ -174,12 +244,18 @@ app.post("/ask", async (req, res) => {
     );
 
     /*
-    Ask Gemini using:
-    
-    PDF + user question
+    ------------------------------------------------
+    PDF + QUESTION
+    ------------------------------------------------
+
+    Gemini receives:
+
+    1. PDF
+    2. User question
+    ------------------------------------------------
     */
 
-    const response = await ai.models.generateContent({
+    const response = await generateWithRetry({
       model: "gemini-3.6-flash",
 
       contents: [
@@ -201,7 +277,8 @@ app.post("/ask", async (req, res) => {
 
     return res.status(500).json({
       error:
-        error.message || "Failed to generate AI response",
+        error.message ||
+        "Failed to generate AI response",
     });
   }
 });
@@ -233,7 +310,7 @@ app.post(
       );
 
       /*
-      Convert uploaded buffer to Blob
+      Convert buffer to Blob
       */
 
       const fileBlob = new Blob(
@@ -269,7 +346,6 @@ app.post(
       });
 
       let attempts = 0;
-
       const maxAttempts = 60;
 
       while (
@@ -319,7 +395,7 @@ app.post(
       );
 
       /*
-      Return PDF information to frontend
+      Return PDF information
       */
 
       return res.json({
@@ -328,9 +404,11 @@ app.post(
         message:
           "PDF uploaded successfully",
 
-        fileName: file.name,
+        fileName:
+          file.name,
 
-        fileUri: file.uri,
+        fileUri:
+          file.uri,
 
         mimeType:
           file.mimeType || "application/pdf",
@@ -370,7 +448,6 @@ app.use(
     */
 
     if (error instanceof multer.MulterError) {
-
       if (
         error.code ===
         "LIMIT_FILE_SIZE"
