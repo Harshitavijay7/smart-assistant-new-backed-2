@@ -100,6 +100,80 @@ async function generateWithRetry(request, maxRetries = 3) {
 
 /*
 ====================================================
+GET GEMINI PDF
+====================================================
+*/
+
+async function getPdfPart(fileName) {
+  if (!fileName || !fileName.trim()) {
+    const error = new Error(
+      "PDF fileName is required"
+    );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  console.log("📄 Getting Gemini file:", fileName);
+
+  const file = await ai.files.get({
+    name: fileName,
+  });
+
+  if (!file) {
+    const error = new Error(
+      "PDF file was not found."
+    );
+
+    error.statusCode = 404;
+
+    throw error;
+  }
+
+  if (file.state === "PROCESSING") {
+    const error = new Error(
+      "PDF is still being processed. Please try again shortly."
+    );
+
+    error.statusCode = 409;
+
+    throw error;
+  }
+
+  if (file.state === "FAILED") {
+    const error = new Error(
+      "Gemini failed to process this PDF."
+    );
+
+    error.statusCode = 500;
+
+    throw error;
+  }
+
+  if (!file.uri) {
+    const error = new Error(
+      "PDF file URI is unavailable."
+    );
+
+    error.statusCode = 500;
+
+    throw error;
+  }
+
+  const filePart = createPartFromUri(
+    file.uri,
+    file.mimeType || "application/pdf"
+  );
+
+  return {
+    file,
+    filePart,
+  };
+}
+
+/*
+====================================================
 HOME
 ====================================================
 */
@@ -139,7 +213,7 @@ app.post("/ask", async (req, res) => {
         });
 
       return res.json({
-        question: question,
+        question,
         answer: response.text,
       });
     }
@@ -149,56 +223,24 @@ app.post("/ask", async (req, res) => {
     */
 
     console.log("📚 PDF Chat requested");
-    console.log("Gemini file:", fileName);
 
-    const file = await ai.files.get({
-      name: fileName,
-    });
+    const { file, filePart } =
+      await getPdfPart(fileName);
 
-    if (!file) {
-      return res.status(404).json({
-        error: "PDF file was not found.",
+    const response =
+      await generateWithRetry({
+        model: "gemini-3.6-flash",
+
+        contents: [
+          filePart,
+          question,
+        ],
       });
-    }
-
-    if (file.state === "PROCESSING") {
-      return res.status(409).json({
-        error:
-          "PDF is still being processed. Please try again shortly.",
-      });
-    }
-
-    if (file.state === "FAILED") {
-      return res.status(500).json({
-        error:
-          "Gemini failed to process this PDF.",
-      });
-    }
-
-    if (!file.uri) {
-      return res.status(500).json({
-        error: "PDF file URI is unavailable.",
-      });
-    }
-
-    const filePart = createPartFromUri(
-      file.uri,
-      file.mimeType || "application/pdf"
-    );
-
-    const response = await generateWithRetry({
-      model: "gemini-3.6-flash",
-
-      contents: [
-        filePart,
-        question,
-      ],
-    });
 
     console.log("✅ PDF answer generated");
 
     return res.json({
-      question: question,
+      question,
       answer: response.text,
       fileName: file.name,
     });
@@ -206,7 +248,9 @@ app.post("/ask", async (req, res) => {
   } catch (error) {
     console.error("GEMINI ERROR:", error);
 
-    return res.status(500).json({
+    return res.status(
+      error.statusCode || 500
+    ).json({
       error:
         error.message ||
         "Failed to generate AI response",
@@ -216,23 +260,7 @@ app.post("/ask", async (req, res) => {
 
 /*
 ====================================================
-AI NOTES ENDPOINT
-====================================================
-
-Request:
-
-{
-  "fileName": "files/XXXXXXXX"
-}
-
-Response:
-
-{
-  "success": true,
-  "fileName": "files/XXXXXXXX",
-  "notes": "..."
-}
-
+AI NOTES
 ====================================================
 */
 
@@ -240,81 +268,19 @@ app.post("/notes", async (req, res) => {
   try {
     const { fileName } = req.body;
 
-    /*
-    Validate fileName
-    */
+    const { file, filePart } =
+      await getPdfPart(fileName);
 
-    if (!fileName || !fileName.trim()) {
-      return res.status(400).json({
-        error:
-          "PDF fileName is required",
-      });
-    }
-
-    console.log("📝 Notes generation requested");
-    console.log("Gemini file:", fileName);
-
-    /*
-    Get Gemini PDF
-    */
-
-    const file = await ai.files.get({
-      name: fileName,
-    });
-
-    if (!file) {
-      return res.status(404).json({
-        error:
-          "PDF file was not found.",
-      });
-    }
-
-    /*
-    Check processing state
-    */
-
-    if (file.state === "PROCESSING") {
-      return res.status(409).json({
-        error:
-          "PDF is still being processed. Please try again shortly.",
-      });
-    }
-
-    if (file.state === "FAILED") {
-      return res.status(500).json({
-        error:
-          "Gemini failed to process this PDF.",
-      });
-    }
-
-    /*
-    Check URI
-    */
-
-    if (!file.uri) {
-      return res.status(500).json({
-        error:
-          "PDF file URI is unavailable.",
-      });
-    }
-
-    /*
-    Create Gemini PDF part
-    */
-
-    const filePart = createPartFromUri(
-      file.uri,
-      file.mimeType || "application/pdf"
+    console.log(
+      "📝 Notes generation requested:",
+      fileName
     );
-
-    /*
-    Notes generation prompt
-    */
 
     const notesPrompt = `
 You are IntelliLearn AI, an educational study assistant.
 
-Read the provided PDF carefully and create clear, useful study notes based ONLY on the content of the PDF.
+Read the provided PDF carefully and create clear,
+useful study notes based ONLY on the content of the PDF.
 
 Follow this structure:
 
@@ -343,17 +309,12 @@ Give a short revision section containing the most important points to remember.
 
 Rules:
 - Use information from the PDF.
-- Do not invent topics that are not supported by the PDF.
+- Do not invent topics not supported by the PDF.
 - Keep the notes exam-friendly.
 - Prefer headings and bullet points.
 - Keep explanations clear and easy to understand.
-- Preserve important technical terminology from the PDF.
-- Do not mention that you are an AI.
+- Preserve important technical terminology.
 `;
-
-    /*
-    Generate notes with retry protection
-    */
 
     const response =
       await generateWithRetry({
@@ -381,7 +342,9 @@ Rules:
       error
     );
 
-    return res.status(500).json({
+    return res.status(
+      error.statusCode || 500
+    ).json({
       error:
         error.message ||
         "Failed to generate notes",
@@ -391,7 +354,292 @@ Rules:
 
 /*
 ====================================================
-PDF UPLOAD ENDPOINT
+MCQ GENERATOR
+====================================================
+
+Generates exactly 10 MCQs from the selected PDF.
+
+Each MCQ contains:
+
+- question
+- 4 options
+- correctAnswer
+- explanation
+
+====================================================
+*/
+
+app.post("/mcqs", async (req, res) => {
+  try {
+    const { fileName } = req.body;
+
+    const { file, filePart } =
+      await getPdfPart(fileName);
+
+    console.log(
+      "❓ MCQ generation requested:",
+      fileName
+    );
+
+    const mcqPrompt = `
+You are IntelliLearn AI, an educational exam-preparation assistant.
+
+Read the provided PDF carefully.
+
+Generate EXACTLY 10 multiple-choice questions
+based ONLY on the information contained in the PDF.
+
+The questions should test important concepts,
+definitions, facts, examples, and understanding
+from the PDF.
+
+Return ONLY valid JSON.
+Do not use markdown.
+Do not add explanations outside the JSON.
+
+Use exactly this structure:
+
+{
+  "mcqs": [
+    {
+      "question": "Question text",
+      "options": [
+        "Option A",
+        "Option B",
+        "Option C",
+        "Option D"
+      ],
+      "correctAnswer": "Option A",
+      "explanation": "Short explanation of why this is correct."
+    }
+  ]
+}
+
+Rules:
+- Generate exactly 10 questions.
+- Every question must have exactly 4 options.
+- Only ONE option must be correct.
+- correctAnswer must exactly match one of the four options.
+- Questions must be based on the PDF.
+- Do not invent information.
+- Avoid duplicate questions.
+- Mix easy, medium, and difficult questions.
+- Keep questions useful for university exam preparation.
+- Keep explanations short and clear.
+`;
+
+    const response =
+      await generateWithRetry({
+        model: "gemini-3.6-flash",
+
+        contents: [
+          filePart,
+          mcqPrompt,
+        ],
+      });
+
+    const rawText =
+      response.text.trim();
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error(
+        "MCQ JSON PARSE ERROR:",
+        parseError
+      );
+
+      return res.status(500).json({
+        error:
+          "Gemini generated an invalid MCQ format. Please try again.",
+        rawResponse: rawText,
+      });
+    }
+
+    if (
+      !parsed.mcqs ||
+      !Array.isArray(parsed.mcqs) ||
+      parsed.mcqs.length !== 10
+    ) {
+      return res.status(500).json({
+        error:
+          "Gemini did not generate exactly 10 MCQs. Please try again.",
+      });
+    }
+
+    console.log(
+      "✅ 10 MCQs generated successfully"
+    );
+
+    return res.json({
+      success: true,
+      fileName: file.name,
+      mcqs: parsed.mcqs,
+    });
+
+  } catch (error) {
+    console.error(
+      "MCQ GENERATION ERROR:",
+      error
+    );
+
+    return res.status(
+      error.statusCode || 500
+    ).json({
+      error:
+        error.message ||
+        "Failed to generate MCQs",
+    });
+  }
+});
+
+/*
+====================================================
+FLASHCARD GENERATOR
+====================================================
+
+Generates exactly 10 flashcards.
+
+Each card contains:
+
+- front
+- back
+
+====================================================
+*/
+
+app.post(
+  "/flashcards",
+  async (req, res) => {
+    try {
+      const { fileName } = req.body;
+
+      const { file, filePart } =
+        await getPdfPart(fileName);
+
+      console.log(
+        "🗂️ Flashcard generation requested:",
+        fileName
+      );
+
+      const flashcardPrompt = `
+You are IntelliLearn AI, an educational study assistant.
+
+Read the provided PDF carefully.
+
+Generate EXACTLY 10 useful flashcards
+based ONLY on information contained in the PDF.
+
+The flashcards should focus on:
+- important definitions
+- important concepts
+- important facts
+- key terminology
+- important relationships
+- exam-relevant information
+
+Return ONLY valid JSON.
+Do not use markdown.
+Do not add explanations outside the JSON.
+
+Use exactly this structure:
+
+{
+  "flashcards": [
+    {
+      "front": "Question or concept",
+      "back": "Correct answer or explanation"
+    }
+  ]
+}
+
+Rules:
+- Generate exactly 10 flashcards.
+- Every flashcard must have a front and a back.
+- Keep the front concise.
+- Keep the answer clear and useful for revision.
+- Base every flashcard on the PDF.
+- Do not invent information.
+- Avoid duplicate flashcards.
+- Prioritize exam-relevant content.
+`;
+
+      const response =
+        await generateWithRetry({
+          model: "gemini-3.6-flash",
+
+          contents: [
+            filePart,
+            flashcardPrompt,
+          ],
+        });
+
+      const rawText =
+        response.text.trim();
+
+      let parsed;
+
+      try {
+        parsed = JSON.parse(rawText);
+      } catch (parseError) {
+        console.error(
+          "FLASHCARD JSON PARSE ERROR:",
+          parseError
+        );
+
+        return res.status(500).json({
+          error:
+            "Gemini generated an invalid flashcard format. Please try again.",
+          rawResponse: rawText,
+        });
+      }
+
+      if (
+        !parsed.flashcards ||
+        !Array.isArray(
+          parsed.flashcards
+        ) ||
+        parsed.flashcards.length !== 10
+      ) {
+        return res.status(500).json({
+          error:
+            "Gemini did not generate exactly 10 flashcards. Please try again.",
+        });
+      }
+
+      console.log(
+        "✅ 10 flashcards generated successfully"
+      );
+
+      return res.json({
+        success: true,
+        fileName: file.name,
+        flashcards:
+          parsed.flashcards,
+      });
+
+    } catch (error) {
+      console.error(
+        "FLASHCARD GENERATION ERROR:",
+        error
+      );
+
+      return res.status(
+        error.statusCode || 500
+      ).json({
+        error:
+          error.message ||
+          "Failed to generate flashcards",
+      });
+    }
+  }
+);
+
+/*
+====================================================
+PDF UPLOAD
 ====================================================
 */
 
@@ -461,7 +709,9 @@ app.post(
         );
       }
 
-      if (fileInfo.state === "FAILED") {
+      if (
+        fileInfo.state === "FAILED"
+      ) {
         return res.status(500).json({
           error:
             "Gemini failed to process the PDF.",
